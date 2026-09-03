@@ -31,7 +31,6 @@ const FALLBACK_MODELS = ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'mix
 // 🔥 BASE DE CONHECIMENTO - ESTÉTICA FEMININA
 // ============================================
 const CONHECIMENTO_ESTETICA = {
-    // Cuidados com a Pele
     pele: {
         rotina: [
             'Limpeza facial (manhã e noite)',
@@ -55,7 +54,6 @@ const CONHECIMENTO_ESTETICA = {
             'sensível': 'Vermelhidão, coceira, reação a produtos'
         }
     },
-    // Maquiagem
     makeup: {
         passos: [
             'Preparação da pele (limpeza, hidratação, primer)',
@@ -76,7 +74,6 @@ const CONHECIMENTO_ESTETICA = {
             'Remova toda a maquiagem antes de dormir'
         ]
     },
-    // Cabelos
     cabelos: {
         tipos: {
             'liso': 'Fácil de pentear, brilho natural',
@@ -92,7 +89,6 @@ const CONHECIMENTO_ESTETICA = {
             'Evitar água muito quente'
         ]
     },
-    // Alimentação e Beleza
     alimentacao: {
         alimentos: [
             'Água (hidratação é essencial)',
@@ -109,7 +105,6 @@ const CONHECIMENTO_ESTETICA = {
             'Reduza o consumo de álcool e cafeína'
         ]
     },
-    // Exercícios e Bem-estar
     bem_estar: {
         beneficios: [
             'Melhora a circulação sanguínea',
@@ -129,31 +124,28 @@ const CONHECIMENTO_ESTETICA = {
 };
 
 // ============================================
-// 🔥 MIDDLEWARES
+// 🔥 MIDDLEWARES - CORRIGIDO
 // ============================================
 
-// CORS configurado para produção
+// ✅ CORS atualizado para aceitar todas as origens (produção)
 app.use(cors({
-    origin: [
-        'http://localhost:3000',
-        'http://localhost:5173',
-        'https://seu-site-react.vercel.app',
-        'https://seu-site-react.netlify.app',
-        '*'
-    ],
+    origin: '*', // Permite todas as origens para teste
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
     allowedHeaders: ['Content-Type', 'Authorization', 'Accept', 'X-Requested-With']
 }));
 
+// ✅ Helmet com configurações flexíveis
 app.use(helmet({
     crossOriginResourcePolicy: { policy: "cross-origin" },
     contentSecurityPolicy: false,
+    crossOriginEmbedderPolicy: false,
 }));
 
+// Rate limiting
 const limiter = rateLimit({
     windowMs: 60 * 1000,
-    max: 30,
+    max: 100, // Aumentado para evitar bloqueios em testes
     message: { error: 'Muitas requisições. Aguarde um momento.' },
     standardHeaders: true,
     legacyHeaders: false,
@@ -246,15 +238,10 @@ function detectarTema(pergunta) {
     return null;
 }
 
-// ============================================
-// 🔥 BUSCAR CONHECIMENTO LOCAL
-// ============================================
-
 function buscarConhecimentoLocal(tema, pergunta) {
     const perguntaLower = pergunta.toLowerCase();
     let resposta = [];
 
-    // Pele
     if (tema === 'pele') {
         if (perguntaLower.includes('rotina') || perguntaLower.includes('como cuidar')) {
             resposta.push('📋 **Rotina de Cuidados com a Pele:**');
@@ -276,7 +263,6 @@ function buscarConhecimentoLocal(tema, pergunta) {
         }
     }
 
-    // Maquiagem
     if (tema === 'makeup' || tema === 'make') {
         if (perguntaLower.includes('passo') || perguntaLower.includes('como fazer') || perguntaLower.includes('aplicar')) {
             resposta.push('💄 **Passos para uma Maquiagem Perfeita:**');
@@ -292,7 +278,6 @@ function buscarConhecimentoLocal(tema, pergunta) {
         }
     }
 
-    // Cabelos
     if (tema === 'cabelos') {
         if (perguntaLower.includes('tipo')) {
             resposta.push('💇‍♀️ **Tipos de Cabelo:**');
@@ -308,7 +293,6 @@ function buscarConhecimentoLocal(tema, pergunta) {
         }
     }
 
-    // Alimentação
     if (tema === 'alimentacao') {
         resposta.push('🥗 **Alimentos que Favorecem a Beleza:**');
         CONHECIMENTO_ESTETICA.alimentacao.alimentos.forEach((item) => {
@@ -320,7 +304,6 @@ function buscarConhecimentoLocal(tema, pergunta) {
         });
     }
 
-    // Bem-estar
     if (tema === 'bem_estar') {
         resposta.push('🧘‍♀️ **Benefícios dos Exercícios para a Beleza:**');
         CONHECIMENTO_ESTETICA.bem_estar.beneficios.forEach((item) => {
@@ -383,12 +366,14 @@ app.get('/api/bot/temas', (_req, res) => {
 });
 
 // ============================================
-// 🔥 CHAT PRINCIPAL
+// 🔥 CHAT PRINCIPAL - CORRIGIDO
 // ============================================
 
 app.post('/api/bot/chat', async (req, res) => {
     try {
         const { message, history = [] } = req.body;
+
+        console.log('📥 Body recebido:', { message, historyLength: history.length });
 
         if (!message || typeof message !== 'string' || message.trim().length === 0) {
             return res.status(400).json({ error: 'A mensagem não pode estar vazia.' });
@@ -397,11 +382,9 @@ app.post('/api/bot/chat', async (req, res) => {
         const userQuery = message.trim();
         console.log(`\n💬 Bella recebeu: "${userQuery}"`);
 
-        // 🔥 DETECTA TEMA
         const tema = detectarTema(userQuery);
         console.log(`📊 Tema detectado: ${tema || 'geral'}`);
 
-        // 🔥 BUSCA CONHECIMENTO LOCAL
         let conhecimentoLocal = null;
         if (tema) {
             conhecimentoLocal = buscarConhecimentoLocal(tema, userQuery);
@@ -410,7 +393,7 @@ app.post('/api/bot/chat', async (req, res) => {
             }
         }
 
-        // 🔥 PREPARA O PROMPT DO SISTEMA
+        // ✅ CONSTRUÇÃO DO HISTÓRICO MELHORADA
         const systemPrompt = `Você é a Bella, uma assistente virtual especializada em estética feminina, beleza, cuidados pessoais e bem-estar.
 
 🧠 **PERSONALIDADE:**
@@ -439,21 +422,26 @@ ${conhecimentoLocal ? `\n📚 **INFORMAÇÃO ESPECÍFICA PARA ESTA PERGUNTA:**\n
 
 🎯 **OBJETIVO:** Ser a melhor amiga de beleza e bem-estar da usuária!`;
 
-        // 🔥 PREPARA O HISTÓRICO
+        // ✅ CONSTRUÇÃO DO HISTÓRICO MELHORADA
         const messagesToSend = [
             { role: 'system', content: systemPrompt },
         ];
 
+        // Adiciona histórico se existir
         if (Array.isArray(history) && history.length > 0) {
+            // Pega apenas as últimas 10 mensagens para não sobrecarregar
             const limitedHistory = history.slice(-10);
-            limitedHistory.forEach((h) => {
+            for (const h of limitedHistory) {
                 if (h && (h.role === 'user' || h.role === 'assistant') && typeof h.content === 'string') {
                     messagesToSend.push({ role: h.role, content: h.content });
                 }
-            });
+            }
         }
 
+        // ✅ SEMPRE adiciona a mensagem atual
         messagesToSend.push({ role: 'user', content: userQuery });
+
+        console.log(`📨 Total de mensagens para IA: ${messagesToSend.length}`);
 
         // 🔥 USA IA GROQ
         const groq = getGroqClient();
@@ -465,7 +453,6 @@ ${conhecimentoLocal ? `\n📚 **INFORMAÇÃO ESPECÍFICA PARA ESTA PERGUNTA:**\n
                 const { completion, modelUsed } = await callGroqWithFallback(groq, messagesToSend, TEMPERATURE, MAX_TOKENS);
                 let reply = completion.choices[0]?.message?.content || 'Desculpe, não consegui processar sua pergunta.';
 
-                // 🔥 SE TIVER CONHECIMENTO LOCAL, ADICIONA AO FINAL COMO DICA EXTRA
                 if (conhecimentoLocal && !reply.includes(conhecimentoLocal.substring(0, 50))) {
                     reply += `\n\n💖 **Dica Bella:**\n${conhecimentoLocal}`;
                 }
@@ -483,7 +470,6 @@ ${conhecimentoLocal ? `\n📚 **INFORMAÇÃO ESPECÍFICA PARA ESTA PERGUNTA:**\n
 
             } catch (error) {
                 console.error('❌ Erro na IA:', error);
-                // Fallback: usa conhecimento local
                 if (conhecimentoLocal) {
                     return res.json({
                         reply: `💖 **Bella aqui!** \n\n${conhecimentoLocal}\n\n✨ *Usei meu conhecimento interno para te responder. Se quiser mais detalhes, me pergunte novamente!*`,
@@ -492,7 +478,6 @@ ${conhecimentoLocal ? `\n📚 **INFORMAÇÃO ESPECÍFICA PARA ESTA PERGUNTA:**\n
                         hasLocalKnowledge: true,
                     });
                 }
-                // Fallback genérico
                 return res.json({
                     reply: `💖 **Olá! Eu sou a Bella, sua assistente de estética feminina!**\n\n` +
                            `✨ **Posso ajudar com:**\n` +
@@ -509,7 +494,6 @@ ${conhecimentoLocal ? `\n📚 **INFORMAÇÃO ESPECÍFICA PARA ESTA PERGUNTA:**\n
             }
         }
 
-        // 🔥 SEM GROQ - USA CONHECIMENTO LOCAL
         if (conhecimentoLocal) {
             return res.json({
                 reply: `💖 **Bella aqui!** \n\n${conhecimentoLocal}\n\n✨ *Posso te ajudar com mais dúvidas sobre estética e beleza!*`,
@@ -519,7 +503,6 @@ ${conhecimentoLocal ? `\n📚 **INFORMAÇÃO ESPECÍFICA PARA ESTA PERGUNTA:**\n
             });
         }
 
-        // 🔥 FALLBACK FINAL
         return res.json({
             reply: `💖 **Olá! Eu sou a Bella!**\n\n` +
                    `✨ **Posso te ajudar com:**\n` +
