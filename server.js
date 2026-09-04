@@ -23,9 +23,52 @@ if (!GROQ_API_KEY) {
 }
 const MODEL = process.env.MODEL || 'openai/gpt-oss-120b';
 const TEMPERATURE = parseFloat(process.env.TEMPERATURE || '0.7') || 0.7;
-const MAX_TOKENS = parseInt(process.env.MAX_TOKENS || '2048', 10) || 2048;
+const MAX_TOKENS = parseInt(process.env.MAX_TOKENS || '3072', 10) || 3072;
 
-const FALLBACK_MODELS = ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'mixtral-8x7b-32768'];
+// 🧠 NOVO: nível de esforço de raciocínio ('low' | 'medium' | 'high')
+// Quanto maior, mais o modelo "pensa" antes de responder (mais latência e tokens, mais qualidade).
+const REASONING_EFFORT = process.env.REASONING_EFFORT || 'high';
+
+// Modelos de fallback — priorizando modelos com capacidade de raciocínio real
+const FALLBACK_MODELS = [
+    'qwen/qwen3.8-27b',            // thinking mode nativo, ótimo custo-benefício
+    'deepseek-r1-distill-llama-70b', // cadeia de raciocínio longa, forte em lógica
+    'llama-3.3-70b-versatile',
+    'llama-3.1-8b-instant',
+];
+
+// Modelos Groq que aceitam parâmetros de raciocínio (reasoning_effort / reasoning_format)
+const REASONING_MODEL_PATTERNS = [
+    /^openai\/gpt-oss/,   // gpt-oss-20b / gpt-oss-120b -> reasoning_effort: low|medium|high
+    /^qwen\//,            // qwen3.x -> reasoning_effort: none|default (thinking mode)
+    /^qwen-qwq/,          // qwq-32b -> reasoning_format
+    /^deepseek-r1/,       // deepseek-r1-distill-* -> reasoning_format
+];
+
+function isReasoningModel(modelId) {
+    return REASONING_MODEL_PATTERNS.some((re) => re.test(modelId));
+}
+
+// Monta os parâmetros extras de raciocínio de acordo com o modelo escolhido.
+// Isso evita mandar um parâmetro inválido pra modelo que não é "reasoning".
+function buildReasoningParams(modelId) {
+    if (!isReasoningModel(modelId)) return {};
+
+    if (/^openai\/gpt-oss/.test(modelId)) {
+        // GPT-OSS aceita 'low' | 'medium' | 'high'
+        return { reasoning_effort: REASONING_EFFORT };
+    }
+
+    if (/^qwen\//.test(modelId)) {
+        // Qwen 3.x usa 'default' (pensa) ou 'none' (não pensa)
+        return { reasoning_effort: REASONING_EFFORT === 'low' ? 'none' : 'default' };
+    }
+
+    // qwen-qwq-32b e deepseek-r1-distill-* expõem o raciocínio via reasoning_format
+    // 'hidden' = não retorna o <think>...</think> pro usuário final (recomendado pra chatbot)
+    // 'parsed' = retorna separado em completion.choices[0].message.reasoning
+    return { reasoning_format: 'hidden' };
+}
 
 // ============================================
 // 🔥 BASE DE CONHECIMENTO - ESTÉTICA FEMININA
@@ -124,28 +167,25 @@ const CONHECIMENTO_ESTETICA = {
 };
 
 // ============================================
-// 🔥 MIDDLEWARES - CORRIGIDO
+// 🔥 MIDDLEWARES
 // ============================================
 
-// ✅ CORS atualizado para aceitar todas as origens (produção)
 app.use(cors({
-    origin: '*', // Permite todas as origens para teste
+    origin: '*',
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
     allowedHeaders: ['Content-Type', 'Authorization', 'Accept', 'X-Requested-With']
 }));
 
-// ✅ Helmet com configurações flexíveis
 app.use(helmet({
     crossOriginResourcePolicy: { policy: "cross-origin" },
     contentSecurityPolicy: false,
     crossOriginEmbedderPolicy: false,
 }));
 
-// Rate limiting
 const limiter = rateLimit({
     windowMs: 60 * 1000,
-    max: 100, // Aumentado para evitar bloqueios em testes
+    max: 100,
     message: { error: 'Muitas requisições. Aguarde um momento.' },
     standardHeaders: true,
     legacyHeaders: false,
@@ -155,7 +195,6 @@ app.use('/api', limiter);
 app.use(express.json({ limit: '20mb' }));
 app.use(express.urlencoded({ extended: true, limit: '20mb' }));
 
-// Logger
 app.use((req, _res, next) => {
     const timestamp = new Date().toISOString();
     console.log(`[${timestamp}] ${req.method} ${req.path}`);
@@ -176,7 +215,7 @@ function getGroqClient() {
         try {
             groqClient = new Groq({
                 apiKey: GROQ_API_KEY,
-                timeout: 30000,
+                timeout: 45000, // maior, pois raciocínio 'high' demora mais
                 maxRetries: 2,
             });
             console.log('✅ Cliente Groq inicializado');
@@ -194,16 +233,20 @@ async function callGroqWithFallback(groq, messages, temperature = TEMPERATURE, m
     let lastError = null;
     for (const modelToUse of modelsToTry) {
         try {
-            console.log(`📤 Tentando modelo: ${modelToUse}`);
+            const reasoningParams = buildReasoningParams(modelToUse);
+            console.log(`📤 Tentando modelo: ${modelToUse}`, reasoningParams);
+
             const resp = await groq.chat.completions.create({
                 model: modelToUse,
                 messages,
                 temperature,
                 max_tokens: maxTokens,
                 top_p: 0.9,
+                ...reasoningParams,
             });
+
             console.log(`✅ Sucesso com modelo: ${modelToUse}`);
-            return { completion: resp, modelUsed: modelToUse };
+            return { completion: resp, modelUsed: modelToUse, isReasoning: isReasoningModel(modelToUse) };
         } catch (err) {
             lastError = err;
             console.warn(`❌ Modelo ${modelToUse} falhou: ${err.message}`);
@@ -322,29 +365,30 @@ function buscarConhecimentoLocal(tema, pergunta) {
 // 🔥 ROTAS DA API
 // ============================================
 
-// Health check
 app.get('/health', (_req, res) => {
     res.json({
         status: 'online',
         service: 'Bella - Assistente de Estética Feminina',
-        version: '1.0.0',
+        version: '1.1.0',
         timestamp: new Date().toISOString(),
         config: {
             model: MODEL,
             temperature: TEMPERATURE,
+            reasoningEffort: REASONING_EFFORT,
+            isReasoningModel: isReasoningModel(MODEL),
             hasApiKey: !!GROQ_API_KEY,
         },
         temas: Object.keys(TEMAS),
     });
 });
 
-// Status do bot
 app.get('/api/bot/status', (_req, res) => {
     res.json({
         active: true,
         name: 'Bella - Assistente de Estética Feminina',
-        version: '1.0.0',
+        version: '1.1.0',
         model: MODEL,
+        reasoningEffort: REASONING_EFFORT,
         hasGroqKey: !!GROQ_API_KEY,
         mode: 'estetica-feminina',
         temas: Object.keys(TEMAS),
@@ -352,7 +396,6 @@ app.get('/api/bot/status', (_req, res) => {
     });
 });
 
-// Temas disponíveis
 app.get('/api/bot/temas', (_req, res) => {
     res.json({
         temas: [
@@ -366,7 +409,7 @@ app.get('/api/bot/temas', (_req, res) => {
 });
 
 // ============================================
-// 🔥 CHAT PRINCIPAL - CORRIGIDO
+// 🔥 CHAT PRINCIPAL
 // ============================================
 
 app.post('/api/bot/chat', async (req, res) => {
@@ -393,7 +436,7 @@ app.post('/api/bot/chat', async (req, res) => {
             }
         }
 
-        // ✅ CONSTRUÇÃO DO HISTÓRICO MELHORADA
+        // ✅ SYSTEM PROMPT COM RACIOCÍNIO PROFUNDO
         const systemPrompt = `Você é a Bella, uma assistente virtual especializada em estética feminina, beleza, cuidados pessoais e bem-estar.
 
 🧠 **PERSONALIDADE:**
@@ -412,24 +455,31 @@ app.post('/api/bot/chat', async (req, res) => {
 
 ${conhecimentoLocal ? `\n📚 **INFORMAÇÃO ESPECÍFICA PARA ESTA PERGUNTA:**\n${conhecimentoLocal}\n` : ''}
 
+🧩 **PROCESSO DE RACIOCÍNIO INTERNO (siga antes de responder, mas NÃO mostre esse passo a passo pra usuária — só o resultado final):**
+1. **Entenda o contexto real:** releia a pergunta e o histórico da conversa. Que tipo de pele/cabelo/rotina/restrição a usuária já mencionou? O que ela está realmente tentando resolver por trás da pergunta (ex.: "acne" pode ser sobre autoestima, não só sobre produto)?
+2. **Levante hipóteses múltiplas:** pense em pelo menos 2-3 causas ou caminhos possíveis para o problema antes de escolher um. Ex.: pele oleosa pode ser genética, hormonal, produto errado, clima, ou rotina excessiva de limpeza.
+3. **Cruze com o conhecimento técnico:** valide cada hipótese com o que você sabe de dermocosmética, tricologia, nutrição e bem-estar. Descarte o que não se sustenta.
+4. **Pese trade-offs:** toda recomendação tem prós, contras e contexto (custo, tempo, sensibilidade da pele, orçamento, se é dia ou noite, clima). Escolha a recomendação que melhor equilibra eficácia e viabilidade real pra ela.
+5. **Verifique segurança:** nunca recomende algo agressivo, ativos incompatíveis (ex.: ácido + retinol sem orientação) ou promessas irreais. Se o caso parecer sério (acne cística, queda de cabelo abrupta, reação alérgica), oriente a procurar um dermatologista/profissional, sem alarmismo.
+6. **Personalize e estruture:** só depois de passar pelos passos acima, monte a resposta final: clara, prática, com passos acionáveis, adaptada ao que ela contou sobre si.
+7. **Autocrítica rápida:** antes de responder, pergunte-se "essa resposta faz sentido pro perfil dela, ou é genérica demais?". Se for genérica, refine.
+
 ⚠️ **REGRAS:**
 1. Responda SEMPRE em português do Brasil
-2. Seja acolhedora e empática
-3. Dê dicas práticas e aplicáveis
-4. Se não souber algo, diga honestamente e sugira onde procurar
-5. Incentive a autoestima e o autocuidado
-6. Use emojis para tornar a conversa mais agradável
+2. Mostre APENAS a resposta final e acolhedora — o raciocínio acima é interno, não deve aparecer explicitado na resposta
+3. Seja acolhedora e empática
+4. Dê dicas práticas, específicas e aplicáveis (evite conselhos genéricos quando já souber o contexto da usuária)
+5. Se não souber algo, diga honestamente e sugira onde procurar (ex.: dermatologista, tricologista, nutricionista)
+6. Incentive a autoestima e o autocuidado
+7. Use emojis para tornar a conversa mais agradável, sem exagerar
 
-🎯 **OBJETIVO:** Ser a melhor amiga de beleza e bem-estar da usuária!`;
+🎯 **OBJETIVO:** Ser a melhor amiga de beleza e bem-estar da usuária, dando conselhos pensados de verdade — não respostas de prateleira.`;
 
-        // ✅ CONSTRUÇÃO DO HISTÓRICO MELHORADA
         const messagesToSend = [
             { role: 'system', content: systemPrompt },
         ];
 
-        // Adiciona histórico se existir
         if (Array.isArray(history) && history.length > 0) {
-            // Pega apenas as últimas 10 mensagens para não sobrecarregar
             const limitedHistory = history.slice(-10);
             for (const h of limitedHistory) {
                 if (h && (h.role === 'user' || h.role === 'assistant') && typeof h.content === 'string') {
@@ -438,19 +488,17 @@ ${conhecimentoLocal ? `\n📚 **INFORMAÇÃO ESPECÍFICA PARA ESTA PERGUNTA:**\n
             }
         }
 
-        // ✅ SEMPRE adiciona a mensagem atual
         messagesToSend.push({ role: 'user', content: userQuery });
 
         console.log(`📨 Total de mensagens para IA: ${messagesToSend.length}`);
 
-        // 🔥 USA IA GROQ
         const groq = getGroqClient();
-        
+
         if (groq) {
             try {
-                console.log(`📤 Enviando para Groq (${MODEL})...`);
+                console.log(`📤 Enviando para Groq (${MODEL}) com reasoning_effort=${REASONING_EFFORT}...`);
 
-                const { completion, modelUsed } = await callGroqWithFallback(groq, messagesToSend, TEMPERATURE, MAX_TOKENS);
+                const { completion, modelUsed, isReasoning } = await callGroqWithFallback(groq, messagesToSend, TEMPERATURE, MAX_TOKENS);
                 let reply = completion.choices[0]?.message?.content || 'Desculpe, não consegui processar sua pergunta.';
 
                 if (conhecimentoLocal && !reply.includes(conhecimentoLocal.substring(0, 50))) {
@@ -463,6 +511,7 @@ ${conhecimentoLocal ? `\n📚 **INFORMAÇÃO ESPECÍFICA PARA ESTA PERGUNTA:**\n
                     reply,
                     mode: 'groq-ai',
                     model: modelUsed,
+                    reasoningEffort: isReasoning ? REASONING_EFFORT : null,
                     tema: tema || 'geral',
                     tokens: completion.usage?.total_tokens || 0,
                     hasLocalKnowledge: !!conhecimentoLocal,
@@ -531,15 +580,11 @@ ${conhecimentoLocal ? `\n📚 **INFORMAÇÃO ESPECÍFICA PARA ESTA PERGUNTA:**\n
     }
 });
 
-// ============================================
-// 🔥 ROTA DE TESTE
-// ============================================
-
 app.get('/api/test', (_req, res) => {
     res.json({
         message: 'Bella está online! 💖',
         status: 'ok',
-        version: '1.0.0',
+        version: '1.1.0',
         endpoints: {
             health: '/health',
             chat: '/api/bot/chat',
@@ -554,9 +599,6 @@ app.get('/api/test', (_req, res) => {
     });
 });
 
-// ============================================
-// 🔥 404 - Rota não encontrada
-// ============================================
 app.use('*', (req, res) => {
     res.status(404).json({
         error: 'Rota não encontrada',
@@ -579,7 +621,7 @@ app.listen(PORT, '0.0.0.0', () => {
     console.log(`💖 BELLA - ASSISTENTE DE ESTÉTICA FEMININA`);
     console.log(`${'='.repeat(70)}`);
     console.log(`🚀 Servidor: http://0.0.0.0:${PORT}`);
-    console.log(`📦 Modelo: ${MODEL}`);
+    console.log(`📦 Modelo: ${MODEL} (raciocínio: ${isReasoningModel(MODEL) ? REASONING_EFFORT : 'n/a'})`);
     console.log(`🔑 Groq: ${GROQ_API_KEY ? '✅ Configurada' : '❌ Não configurada'}`);
     console.log(`📚 Temas disponíveis: ${Object.keys(TEMAS).join(', ')}`);
     console.log(`${'='.repeat(70)}`);
@@ -592,7 +634,6 @@ app.listen(PORT, '0.0.0.0', () => {
     console.log(`${'='.repeat(70)}\n`);
 });
 
-// Tratamento de encerramento
 process.on('SIGINT', () => {
     console.log('\n💖 Bella foi encerrada. Até logo!');
     process.exit(0);
